@@ -1,84 +1,61 @@
-name: Windows RDP via Ngrok
+name: RDP
 
-on: [push]
+on: [workflow_dispatch]
 
 jobs:
-  rdp-setup:
+  build:
     runs-on: windows-latest
-    timeout-minutes: 360  # 6 hour max (GitHub Free limit)
+    timeout-minutes: 15
 
     steps:
-    - name: Download and extract Ngrok
-      run: |
-        Invoke-WebRequest "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile ngrok.zip
-        Expand-Archive ngrok.zip -DestinationPath .
-        Remove-Item ngrok.zip -Force
+      - name: Download ngrok
+        run: |
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip -Force
+          .\ngrok.exe authtoken $env:NGROK_AUTH_TOKEN
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
-    - name: Authenticate Ngrok
-      run: .\ngrok.exe authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+      - name: Enable RDP & create temp admin user
+        run: |
+          $pw = [System.Web.Security.Membership]::GeneratePassword(14,3)
+          Write-Host "Generated password (not printed for security)"
+          net user temp_rdp_user $pw /add
+          net localgroup administrators temp_rdp_user /add
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          setx TEMP_RDP_PASS $pw
+        shell: powershell
 
-    - name: Enable Remote Desktop
-      run: |
-        Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        New-NetFirewallRule -DisplayName "Allow RDP via Ngrok" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389
-
-    - name: Create RDP User
-      run: |
-        net user kamel007 kamel007 /add /Y
-        net localgroup administrators kamel007 /add
-        reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v kamel007 /t REG_DWORD /d 0 /f
-
-    - name: Start Ngrok and display connection info
-      run: |
-        # Start Ngrok and capture output
-        Start-Process -FilePath "$pwd\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow -RedirectStandardOutput ngrok.log
-        
-        # Wait for tunnel establishment
-        $timeout = 60
-        $tunnelUrl = $null
-        
-        while ($timeout -gt 0 -and -not $tunnelUrl) {
-          Start-Sleep -Seconds 5
-          $timeout -= 5
-          
-          # Try API first
+      - name: Start ngrok (background) and show tunnel
+        run: |
+          Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -NoNewWindow
+          Start-Sleep -Seconds 4
           try {
-            $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction Stop
-            $tunnelUrl = $response.tunnels[0].public_url -replace "tcp://", ""
+            $tunnels = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels -ErrorAction Stop
+            $tcp = $tunnels.tunnels | Where-Object { $_.proto -eq 'tcp' } | Select-Object -First 1
+            if ($null -ne $tcp) {
+              Write-Host "Ngrok TCP forwarding: $($tcp.public_url)"
+            } else {
+              Write-Host "No TCP tunnel found. API output:"
+              $tunnels | ConvertTo-Json -Depth 5
+              exit 1
+            }
           } catch {
-            # Fallback to log parsing
-            $logContent = Get-Content ngrok.log -ErrorAction SilentlyContinue
-            $tunnelUrl = $logContent | Select-String -Pattern "tcp://([a-zA-Z0-9\.\-]+:\d+)" | ForEach-Object { $_.Matches.Groups[1].Value }
+            Write-Host "Could not reach ngrok API:" $_.Exception.Message
+            exit 1
           }
-        }
+        shell: powershell
 
-        if (-not $tunnelUrl) {
-          Write-Output "::error::Failed to establish Ngrok tunnel after 60 seconds"
-          Write-Output "=== Ngrok Log Contents ==="
-          Get-Content ngrok.log
-          exit 1
-        }
+      - name: Keep job alive briefly (example: 5 minutes) while you connect
+        run: |
+          Write-Host "Job will sleep now to allow RDP connection window (adjust as needed)."
+          Start-Sleep -Seconds 300
+        shell: powershell
 
-        Write-Output "=========================================="
-        Write-Output "||        RDP CONNECTION DETAILS        ||"
-        Write-Output "=========================================="
-        Write-Output "Address: $tunnelUrl"
-        Write-Output "Username: kamel007"
-        Write-Output "Password: kamel007"
-        Write-Output "------------------------------------------"
-        Write-Output "1. Open Remote Desktop (Win+R → mstsc)"
-        Write-Output "2. Connect to: $tunnelUrl"
-        Write-Output "3. Use credentials above when prompted"
-        Write-Output "=========================================="
-        Write-Output "Note: This VM will self-destruct after 6 hours"
-        Write-Output "=========================================="
-
-        # Keep alive
-        while ($true) { Start-Sleep -Seconds 300 }
-
-    - name: Force cleanup
-      if: always()
-      run: |
-        Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
-        Stop-Process -Name "rdp" -Force -ErrorAction SilentlyContinue
+      - name: Cleanup temp user
+        if: always()
+        run: |
+          net user temp_rdp_user /delete
+          Write-Host "temp_rdp_user deleted (if existed)."
+        shell: powershell
