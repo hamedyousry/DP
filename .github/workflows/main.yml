@@ -17,18 +17,23 @@ jobs:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
 
       - name: Enable RDP & create temp admin user
+        shell: powershell
         run: |
+          # generate a random password
           $pw = [System.Web.Security.Membership]::GeneratePassword(14,3)
-          Write-Host "Generated password (not printed for security)"
+          Write-Host "Generated password (hidden for security)"
           net user temp_rdp_user $pw /add
           net localgroup administrators temp_rdp_user /add
+          # enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # save password in env (in-memory only)
           setx TEMP_RDP_PASS $pw
-        shell: powershell
 
       - name: Start ngrok (background) and show tunnel
+        shell: powershell
         run: |
+          # start ngrok tcp tunnel
           Start-Process -FilePath .\ngrok.exe -ArgumentList "tcp 3389" -NoNewWindow
           Start-Sleep -Seconds 4
           try {
@@ -45,17 +50,16 @@ jobs:
             Write-Host "Could not reach ngrok API:" $_.Exception.Message
             exit 1
           }
-        shell: powershell
 
       - name: Keep job alive briefly (example: 5 minutes) while you connect
-        run: |
-          Write-Host "Job will sleep now to allow RDP connection window (adjust as needed)."
-          Start-Sleep -Seconds 300
         shell: powershell
+        run: |
+          Write-Host "Sleeping 5 minutes to allow RDP connection..."
+          Start-Sleep -Seconds 300
 
       - name: Cleanup temp user
         if: always()
+        shell: powershell
         run: |
           net user temp_rdp_user /delete
           Write-Host "temp_rdp_user deleted (if existed)."
-        shell: powershell
